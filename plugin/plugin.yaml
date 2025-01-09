@@ -1,0 +1,18 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: ChartInflator
+metadata:
+  name: my-plugin
+spec:
+  chart: my-chart
+  values: values.yaml
+
+---
+# configs/app-config.properties
+app.name=MyApplication
+app.port=8080
+app.log.level=INFO
+
+---
+# configs/secrets/db-credentials.properties
+db.username=admin
+db.password=your-secure-password
