@@ -1,0 +1,398 @@
+pipeline:
+  name: DBops_test
+  identifier: DBops_test
+  projectIdentifier: labsproject
+  orgIdentifier: abhilabs
+  stages:
+    - stage:
+        name: Prepare_Deployment
+        identifier: Prepare_Deployment
+        description: ""
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - stepGroup:
+                  name: Prepare_Deployment
+                  identifier: Prepare_Deployment
+                  steps:
+                    - step:
+                        type: GitClone
+                        name: GitClone
+                        identifier: GitClone
+                        spec:
+                          connectorRef: Bitbucket_dre_mongodb
+                          cloneDirectory: /harness/dre.mongodb
+                          build:
+                            type: branch
+                            spec:
+                              branch: <+pipeline.variables.branch>
+                    - step:
+                        type: Run
+                        name: Setup_ChangeSet
+                        identifier: Setup_ChangeSet
+                        spec:
+                          connectorRef: DB_Devops
+                          image: <+pipeline.variables.Image>
+                          shell: Bash
+                          command: |-
+                            BRANCH_NAME="<+pipeline.variables.branch>"
+                            BITBUCKET_USER="<+pipeline.variables.UserName>"
+                            BITBUCKET_TOKEN="<+pipeline.variables.AppPassword>"
+                            REPO_DIR="dre.mongodb"
+
+                            cd "$REPO_DIR" || exit 1
+
+                            git remote set-url origin "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git"
+
+                            if [ -f .git/shallow ]; then
+                                git fetch --unshallow || git fetch --depth=50 origin "$BRANCH_NAME"
+                            fi
+
+                            if [ -z "$(git config user.email)" ]; then
+                                git config user.email "$BITBUCKET_USER@iherb.com"
+                                git config user.name "Harness Automation"
+                            fi
+
+                            CHANGED_FILES=$(find . -path "*/ChangeSets/$BRANCH_NAME/*" \( -iname "*.yaml" -o -iname "*.yml" \) -type f | grep -v "changeset.yaml" | sed 's|^\./||' || true)
+                            FIRST_FILE=$(echo "$CHANGED_FILES" | head -n 1)
+                            CLUSTER=$(echo "$FIRST_FILE" | cut -d'/' -f1)
+                            DB_NAME=$(echo "$FIRST_FILE" | cut -d'/' -f2)
+                            BASE_DIR="${CLUSTER}/${DB_NAME}"
+                            BRANCH_LOG="${BASE_DIR}/ChangeSets/${BRANCH_NAME}/changeset.yaml"
+                            MAIN_LOG="${BASE_DIR}/changelogs.yaml"
+
+                            echo $CHANGED_FILES
+
+                            echo "Create changeset.yaml for $BRANCH_NAME on DB: $CLUSTER/$DB_NAME"
+
+                            for FILE_PATH in $CHANGED_FILES; do
+                                FILENAME=$(basename "$FILE_PATH")
+                                echo "Processing File: $FILENAME"
+
+                                ENTRY_BRANCH=$(printf "\n  - include:\n      file: %s\n      relativeToChangelogFile: true" "${FILENAME}")
+
+                                if [ -f "$BRANCH_LOG" ]; then
+                                    if ! grep -q "file: ${FILENAME}" "$BRANCH_LOG"; then
+                                         [ -n "$(tail -c1 "$BRANCH_LOG")" ] && echo "" >> "$BRANCH_LOG"
+                                         echo "$ENTRY_BRANCH" >> "$BRANCH_LOG"
+                                    fi
+                                else
+                                    mkdir -p "$(dirname "$BRANCH_LOG")"
+                                    echo "databaseChangeLog:" > "$BRANCH_LOG"
+                                    echo "$ENTRY_BRANCH" >> "$BRANCH_LOG"
+                                fi
+                                
+                                git add "$BRANCH_LOG"
+                            done
+
+                            if git diff --staged --quiet; then
+                                echo "No changes needed."
+                            else 
+                                git commit -m "Automated changeset.yaml update for $BRANCH_NAME"
+                                git push "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git" "$BRANCH_NAME"
+                            fi
+                      contextType: Pipeline
+                    - step:
+                        type: Run
+                        name: Setup_Intrim_Branch
+                        identifier: Setup_Intrim_Branch
+                        spec:
+                          connectorRef: DB_Devops
+                          image: <+pipeline.variables.Image>
+                          shell: Bash
+                          command: |-
+                            BRANCH_NAME="<+pipeline.variables.branch>"
+                            TARGET_BRANCH="test"
+                            INTRIM_BRANCH="<+pipeline.variables.branch>_test"
+                            BITBUCKET_USER="<+pipeline.variables.UserName>"
+                            BITBUCKET_TOKEN="<+pipeline.variables.AppPassword>"
+                            REPO_DIR="dre.mongodb"
+
+                            cd "$REPO_DIR" || exit 1
+
+                            git remote set-url origin "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git"
+
+                            if [ -z "$(git config user.email)" ]; then
+                                git config user.email "$BITBUCKET_USER@iherb.com"
+                                git config user.name "Harness Automation"
+                            fi
+
+                            git fetch origin
+                            git checkout -B "$INTRIM_BRANCH" "origin/$TARGET_BRANCH"
+                            echo "Create intrim branch '$INTRIM_BRANCH' for preprod deployment "
+
+                            mapfile -t BRANCH_FILES < <(git ls-tree -r --name-only "origin/$BRANCH_NAME" | grep "ChangeSets/$BRANCH_NAME/")
+
+                            for file in "${BRANCH_FILES[@]}"; do
+                                echo "$file"
+                                git checkout "origin/$BRANCH_NAME" -- "$file"
+                                git add "$file"
+                            done
+
+                            CHANGED_FILES=$(find . -path "*/ChangeSets/$BRANCH_NAME/*" \( -iname "*.yaml" -o -iname "*.yml" \) -type f | grep -v "changeset.yaml" | sed 's|^\./||' || true)
+                            FIRST_FILE=$(echo "$CHANGED_FILES" | head -n 1)
+                            CLUSTER=$(echo "$FIRST_FILE" | cut -d'/' -f1)
+                            DB_NAME=$(echo "$FIRST_FILE" | cut -d'/' -f2)
+                            BASE_DIR="${CLUSTER}/${DB_NAME}"
+                            MAIN_LOG="${BASE_DIR}/changelogs.yaml"
+
+                            ENTRY_MAIN=$(printf "\n  - include:\n      file: ChangeSets/%s/changeset.yaml\n      relativeToChangelogFile: true" "${BRANCH_NAME}")
+
+                            echo "Adding new change's changelog to changelogs.yaml"    
+                            if ! grep -q "file: ChangeSets/${BRANCH_NAME}/changeset.yaml" "$MAIN_LOG"; then
+                                [ -f "$MAIN_LOG" ] && [ -n "$(tail -c1 "$MAIN_LOG")" ] && echo "" >> "$MAIN_LOG"
+                                echo "$ENTRY_MAIN" >> "$MAIN_LOG"
+                            fi
+
+                            git add "$MAIN_LOG"
+
+                            if git diff --staged --quiet; then
+                                echo "No changes needed."
+                            else 
+                                echo "Merging changes from $BRANCH_NAME to $INTRIM_BRANCH"
+                                git commit -m "Merging changeset.yaml and branch changes from $BRANCH_NAME to $INTRIM_BRANCH"
+                                git push --force "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git" "$INTRIM_BRANCH"
+                            fi
+                      contextType: Pipeline
+                  stepGroupInfra:
+                    type: KubernetesDirect
+                    spec:
+                      connectorRef: sample
+            rollbackSteps: []
+          serviceDependencies: []
+        tags: {}
+    - stage:
+        name: Deploy
+        identifier: Deploy
+        description: ""
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - stepGroup:
+                  name: Deploy
+                  identifier: Deploy
+                  steps:
+                    - step:
+                        type: DBSchemaApply
+                        name: DBSchemaApply
+                        identifier: DBSchemaApply
+                        spec:
+                          connectorRef: abhiharnesscxe
+                          migrationType: Liquibase
+                          dbSchema: dummy_schema
+                          dbInstance: dummy_instance
+                          tag: <+trigger.commitSha>
+                        timeout: 10m
+                  stepGroupInfra:
+                    type: KubernetesDirect
+                    spec:
+                      connectorRef: sample
+            rollbackSteps: []
+          serviceDependencies: []
+          environment:
+            environmentRef: qa
+            deployToAll: false
+        tags: {}
+    - stage:
+        name: Post_Deployment
+        identifier: Post_Deployment
+        description: ""
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - stepGroup:
+                  name: Create_PR
+                  identifier: Create_PR
+                  steps:
+                    - step:
+                        type: GitClone
+                        name: GitClone_PostDeploy
+                        identifier: GitClone_PostDeploy
+                        spec:
+                          connectorRef: Bitbucket_dre_mongodb
+                          cloneDirectory: /harness/dre.mongodb
+                          build:
+                            type: branch
+                            spec:
+                              branch: <+pipeline.variables.branch>
+                    - step:
+                        type: Run
+                        name: Setup_Preprod_Intrim
+                        identifier: Setup_Preprod_Intrim
+                        spec:
+                          connectorRef: DB_Devops
+                          image: <+pipeline.variables.Image>
+                          shell: Bash
+                          command: |-
+                            BRANCH_NAME="<+pipeline.variables.branch>"
+                            TARGET_BRANCH="preprod"
+                            INTRIM_BRANCH="<+pipeline.variables.branch>_preprod"
+                            BITBUCKET_USER="<+pipeline.variables.UserName>"
+                            BITBUCKET_TOKEN="<+pipeline.variables.AppPassword>"
+                            REPO_DIR="dre.mongodb"
+
+                            cd "$REPO_DIR" || exit 1
+
+                            git remote set-url origin "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git"
+
+                            if [ -z "$(git config user.email)" ]; then
+                                git config user.email "$BITBUCKET_USER@iherb.com"
+                                git config user.name "Harness Automation"
+                            fi
+
+                            git fetch origin
+                            git checkout -B "$INTRIM_BRANCH" "origin/$TARGET_BRANCH"
+                            echo "Create intrim branch '$INTRIM_BRANCH' for preprod deployment "
+
+                            mapfile -t BRANCH_FILES < <(git ls-tree -r --name-only "origin/$BRANCH_NAME" | grep "ChangeSets/$BRANCH_NAME/")
+
+                            for file in "${BRANCH_FILES[@]}"; do
+                                echo "$file"
+                                git checkout "origin/$BRANCH_NAME" -- "$file"
+                                git add "$file"
+                            done
+
+                            CHANGED_FILES=$(find . -path "*/ChangeSets/$BRANCH_NAME/*" \( -iname "*.yaml" -o -iname "*.yml" \) -type f | grep -v "changeset.yaml" | sed 's|^\./||' || true)
+                            FIRST_FILE=$(echo "$CHANGED_FILES" | head -n 1)
+                            CLUSTER=$(echo "$FIRST_FILE" | cut -d'/' -f1)
+                            DB_NAME=$(echo "$FIRST_FILE" | cut -d'/' -f2)
+                            BASE_DIR="${CLUSTER}/${DB_NAME}"
+
+                            if git diff --staged --quiet; then
+                                echo "No changes needed."
+                            else 
+                                echo "Merging changes from $BRANCH_NAME to $INTRIM_BRANCH"
+                                git commit -m "Merging changeset.yaml and branch changes from $BRANCH_NAME to $INTRIM_BRANCH"
+                                git push --force "https://${BITBUCKET_USER}:${BITBUCKET_TOKEN}@bitbucket.org/iherbllc/dre.mongodb.git" "$INTRIM_BRANCH"
+                            fi
+                    - parallel:
+                        - step:
+                            type: Run
+                            name: Create_Preprod_PR
+                            identifier: Create_Preprod_PR
+                            spec:
+                              connectorRef: DB_Devops
+                              image: <+pipeline.variables.Image>
+                              shell: Bash
+                              command: |-
+                                Source_Branch="<+pipeline.variables.branch>_preprod"
+                                Team_Name="dre"
+                                Team_members=$(curl -s -u "<+pipeline.variables.UserName>:<+pipeline.variables.AppPassword>" \
+                                "https://api.bitbucket.org/2.0/repositories/iherbllc/databases/src/master/.bitbucket/team.yaml")
+
+                                Reviewers=$(echo "$Team_members" | awk -v team="$Team_Name" '
+                                $0 ~ "^"team":" {in_team=1; next}
+                                in_team && $0 ~ "^[[:space:]]*#.*" {next}
+                                in_team && $0 ~ "^[[:space:]]*-" {
+                                    gsub(/^[[:space:]]*-?[[:space:]]*["'\'']?/, "", $0);
+                                    gsub(/["'\'']?[[:space:]]*$/, "", $0);
+                                    print;
+                                    next;
+                                    }
+                                    in_team && $0 !~ "^[[:space:]]*-" {in_team=0}
+                                    ')
+
+                                Reviewer_Json="["
+                                for Reviewer in $Reviewers; do
+                                  Reviewer_Json+="{\"uuid\": \"$Reviewer\"},"
+                                done
+                                Reviewer_Json="${Reviewer_Json%,}]"
+
+                                json_file=$(mktemp)
+
+                                printf '{
+                                    "title": "Automated PR: %s ",
+                                    "source": {"branch": {"name": "%s"}},
+                                    "destination": {"branch":{"name": "%s"}},
+                                    "reviewers": %s,
+                                    "description": "PR was auto-created by Harness ",
+                                    "close_source_branch": false
+                                }' "${Source_Branch}" "${Source_Branch}" "preprod" "${Reviewer_Json}" > "$json_file"
+
+                                PR_Response=$(curl -s -u "<+pipeline.variables.UserName>:<+pipeline.variables.AppPassword>" \
+                                    -H "Content-Type: application/json" \
+                                    -X POST "https://api.bitbucket.org/2.0/repositories/iherbllc/dre.mongodb/pullrequests" \
+                                    -d @"$json_file")
+
+                                    PR_Number=$(echo "$PR_Response" | jq -r '.id')
+                                    echo https://bitbucket.org/iherbllc/dre.mongodb/pull-requests/$PR_Number
+                        - step:
+                            type: Run
+                            name: Create_Production_PR
+                            identifier: Create_Production_PR
+                            spec:
+                              connectorRef: DB_Devops
+                              image: <+pipeline.variables.Image>
+                              shell: Bash
+                              command: |-
+                                Team_Name="dre"
+                                Team_members=$(curl -s -u "<+pipeline.variables.UserName>:<+pipeline.variables.AppPassword>" \
+                                "https://api.bitbucket.org/2.0/repositories/iherbllc/databases/src/master/.bitbucket/team.yaml")
+
+                                Reviewers=$(echo "$Team_members" | awk -v team="$Team_Name" '
+                                $0 ~ "^"team":" {in_team=1; next}
+                                in_team && $0 ~ "^[[:space:]]*#.*" {next}
+                                in_team && $0 ~ "^[[:space:]]*-" {
+                                    gsub(/^[[:space:]]*-?[[:space:]]*["'\'']?/, "", $0);
+                                    gsub(/["'\'']?[[:space:]]*$/, "", $0);
+                                    print;
+                                    next;
+                                    }
+                                    in_team && $0 !~ "^[[:space:]]*-" {in_team=0}
+                                    ')
+
+                                Reviewer_Json="["
+                                for Reviewer in $Reviewers; do
+                                  Reviewer_Json+="{\"uuid\": \"$Reviewer\"},"
+                                done
+                                Reviewer_Json="${Reviewer_Json%,}]"
+
+                                json_file=$(mktemp)
+
+                                printf '{
+                                    "title": "Automated PR: %s ",
+                                    "source": {"branch": {"name": "%s"}},
+                                    "destination": {"branch":{"name": "%s"}},
+                                    "reviewers": %s,
+                                    "description": "PR was auto-created by Harness ",
+                                    "close_source_branch": false
+                                }' "<+pipeline.variables.branch>" "<+pipeline.variables.branch>" "master" "${Reviewer_Json}" > "$json_file"
+
+                                PR_Response=$(curl -s -u "<+pipeline.variables.UserName>:<+pipeline.variables.AppPassword>" \
+                                    -H "Content-Type: application/json" \
+                                    -X POST "https://api.bitbucket.org/2.0/repositories/iherbllc/dre.mongodb/pullrequests" \
+                                    -d @"$json_file")
+
+                                    PR_Number=$(echo "$PR_Response" | jq -r '.id')
+                                    echo https://bitbucket.org/iherbllc/dre.mongodb/pull-requests/$PR_Number   
+                  stepGroupInfra:
+                    type: KubernetesDirect
+                    spec:
+                      connectorRef: sample
+            rollbackSteps: []
+          serviceDependencies: []
+        tags: {}
+  variables:
+    - name: branch
+      type: String
+      description: ""
+      required: false
+      value: <+input>.default(<+trigger.branch>)
+    - name: UserName
+      type: String
+      description: ""
+      required: false
+      value: dummy_user
+    - name: AppPassword
+      type: Secret
+      description: ""
+      required: false
+      value: dummy_app_password
+    - name: Image
+      type: String
+      description: ""
+      required: false
+      value: ubuntu:20.04
