@@ -14,7 +14,7 @@ pipeline:
             steps:
               - stepGroup:
                   name: Prepare_Deployment1
-                  identifier: Prepare_Deployment
+                  identifier: Prepare_Deployment1
                   steps:
                     - step:
                         type: GitClone
