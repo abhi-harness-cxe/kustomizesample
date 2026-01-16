@@ -13,7 +13,7 @@ pipeline:
           execution:
             steps:
               - stepGroup:
-                  name: Prepare_Deployment
+                  name: Prepare_Deployment1
                   identifier: Prepare_Deployment
                   steps:
                     - step:
